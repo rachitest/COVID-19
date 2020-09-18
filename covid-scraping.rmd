@@ -29,7 +29,7 @@ read_excel_allsheets = function(filename, tibble = FALSE) {
     return(x)
 }
 
-# set data for writing files
+# set date for writing files
 # If before 5 PM, then record as last date since DSHS data will not be updated yet
 # TODO: see if this can be removed in place of using the max date on a consistent dataframe
 date_out = ifelse((Sys.time() < as.POSIXct(paste0(Sys.Date(), '16:00'), tz = 'America/Chicago')),
@@ -91,12 +91,26 @@ merged_city = subset(merged_city, Place_Code != 0 & Place_Code != 99990)[, 2:4]
 colnames(merged_city)[1] = 'FIPS'
 ```
 
+# SCHOOL LEVEL 
+
+
+```{r}
+# school files are small (~ 6kb - read every time and don't overwrite)
+nyt_schools = rbindlist(lapply(list.files('original-sources/historical/schools/', full.names = TRUE), read.csv)) %>% 
+  setNames(c('School', 'City', 'County', 'Deaths_Cumulative', 'Cases_Cumulative', 'Date')) %>%
+  mutate(Date = as.Date(Date)) %>% 
+  mutate(Cases_Cumulative = ifelse(Cases_Cumulative == -1, NA, Cases_Cumulative))
+```
+
+
+
 # COUNTY LEVEL
 
 ## Google mobility
 
 ```{r}
 # fread for faster processing
+# TODO: run once a week instead of daily
 mobility_data = fread('https://www.gstatic.com/covid19/mobility/Global_Mobility_Report.csv')
 ```
 
@@ -134,6 +148,8 @@ temp = tempfile()
 download.file(case_url, temp, mode = 'wb') 
 DSHS_cases_time = data.frame(read_excel(temp, sheet = 1))
 
+
+
 # fix colnames & select correct rows
 colnames(DSHS_cases_time) = DSHS_cases_time[2, ]
 DSHS_cases_time = DSHS_cases_time[3:(nrow(DSHS_cases_time) - 11), ]
@@ -153,12 +169,6 @@ DSHS_cases_long$Date = as.Date(gsub('Cases|\r|\r|\n', '', DSHS_cases_long$Date),
 # if a date is missing, fill using previous cumulative cases
 # calculate daily cases by padding the initial cumulative value, then reporting the difference between successive values by county
 DSHS_cases_long$Cases_Cumulative = as.integer(as.character(DSHS_cases_long$Cases_Cumulative))
-
-# DSHS_cases_long_NA = 
-#   DSHS_cases_long %>% 
-#     group_by(County) %>% 
-#     tidyr::complete(Date = seq.Date(min(Date), date_out, by="day")) %>%
-#     mutate(Cases_Daily = c(Cases_Cumulative[1], diff(Cases_Cumulative)))
 
 DSHS_cases_long = 
   DSHS_cases_long %>% 
@@ -222,13 +232,6 @@ length(setdiff(unique(DSHS_deaths_long$County), unique(DSHS_cases_long$County)))
 # calculate daily deaths & fill cumulative deaths
 DSHS_deaths_long$Deaths_Cumulative = as.integer(as.character(DSHS_deaths_long$Deaths_Cumulative))
 
-# DSHS_deaths_long_NA = 
-#   DSHS_deaths_long %>%
-#   mutate(Date = as.Date(Date)) %>%
-#   group_by(County) %>%
-#   tidyr::complete(Date = seq.Date(min(Date), date_out, by="day")) %>%
-#   mutate(Deaths_Daily = c(Deaths_Cumulative[1], diff(Deaths_Cumulative)))
-
 DSHS_deaths_long = 
   DSHS_deaths_long %>%
   mutate(Date = as.Date(Date)) %>%
@@ -242,60 +245,63 @@ DSHS_deaths_long =
 ## testing
 
 ```{r}
-test_url = 'https://dshs.texas.gov/coronavirus/TexasCOVID-19CumulativeTestsOverTimebyCounty.xlsx'
+# LEGACY
+# test_url = 'https://dshs.texas.gov/coronavirus/TexasCOVID-19CumulativeTestsOverTimebyCounty.xlsx'
+# temp = tempfile()
+# download.file(test_url, temp, mode = 'wb')
+# legacy_tests = data.frame(readxl::read_excel(temp, sheet = 1))
+# legacy_tests_long = legacy_tests %>%
+#   setNames(legacy_tests[1, ]) %>%
+#   slice(2:(nrow(.) - 11)) %>%
+#   reshape::melt(id = 'County') %>%
+#   setNames(c('County', 'Date', 'Tests_Cumulative')) %>%
+#   mutate(Date = str_replace(Date, 'Tests Through ', '')) %>%
+#   mutate(Date = as.Date(Date, '%B %d')) %>%
+#   mutate(Tests_Cumulative = as.integer(as.character(Tests_Cumulative)))
+# 
+# # store backup
+# write.csv(legacy_tests_long, 'original-sources/DSHS_county_tests_legacy_cleaned.csv', row.names = FALSE)
+
+# LEGACY
+legacy_tests_long = read.csv('original-sources/DSHS_county_tests_legacy_cleaned.csv') %>% 
+  mutate(Date = as.Date(Date))
+
+# NEW
+test_url = 'https://dshs.texas.gov/coronavirus/TexasCOVID-19CumulativeTestsbyCounty.xlsx'
 temp = tempfile()
-download.file(test_url, temp, mode = 'wb') 
-DSHS_tests_time = data.frame(readxl::read_excel(temp, sheet = 1))
+download.file(test_url, temp, mode = 'wb')
+new_tests = data.frame(readxl::read_excel(temp, sheet = 1))
+new_tests_long = new_tests %>% 
+  setNames(new_tests[1, ]) %>% 
+  filter(str_detect(County, 'County|Unknown|Total', negate = TRUE)) %>% 
+  reshape::melt(id = 'County') %>% 
+  setNames(c('County', 'Date', 'Tests_Cumulative')) %>% 
+  mutate(Date = as.Date(as.integer(Date), '2020-09-12'))
 
-# TEMP FIX drop first duplicated date column
-dupe_dates = which(DSHS_tests_time[1, ] == 'Tests Through June 23')
-DSHS_tests_time = DSHS_tests_time[, -dupe_dates[1]]
+# MERGE
+merged_tests = rbind(legacy_tests_long, new_tests_long)
 
-# change August 32 to Sept 1
-DSHS_tests_time[1, ] = gsub('August 32', 'September 1', DSHS_tests_time[1, ])
-
-# fix colnames
-colnames(DSHS_tests_time) = DSHS_tests_time[1, ]
-DSHS_tests_time = DSHS_tests_time[2:(nrow(DSHS_tests_time) - 9), ]
-colnames(DSHS_tests_time)[1] = 'County'
-
-#save
-write.csv(DSHS_tests_time, 'original-sources/DSHS_county_tests.csv', row.names = FALSE)
-
-# melt
-DSHS_tests_long = reshape::melt(DSHS_tests_time, id = c('County'))
-colnames(DSHS_tests_long) = c('County', 'Date', 'Tests_Cumulative')
-
-# fix dates
-DSHS_tests_long$Date = gsub('*', '', DSHS_tests_long$Date, fixed = T)
-DSHS_tests_long$Date = as.Date(gsub('Tests Through ', '', DSHS_tests_long$Date), format = '%B%d')
-
-# replace '--' and '-' with NA
-DSHS_tests_long$Tests_Cumulative = na_if(DSHS_tests_long$Tests_Cumulative, '-')
-DSHS_tests_long$Tests_Cumulative = na_if(DSHS_tests_long$Tests_Cumulative, '--')
-
-DSHS_tests_long$Tests_Cumulative = as.numeric(as.character(DSHS_tests_long$Tests_Cumulative))
-
-# calculate daily tests
-# DSHS_tests_long_NA = 
-#     DSHS_tests_long %>% 
-#     group_by(County) %>% 
-#     tidyr::complete(Date = seq.Date(min(Date), date_out, by="day")) %>%
-#     mutate(Tests_Daily = c(Tests_Cumulative[1], diff(Tests_Cumulative)))
-
-DSHS_tests_long = 
-  DSHS_tests_long %>% 
+DSHS_tests_long = merged_tests %>%
   group_by(County) %>% 
   tidyr::complete(Date = seq.Date(min(Date), date_out, by="day")) %>%
   mutate(Tests_Cumulative_NA = Tests_Cumulative) %>%
   tidyr::fill(Tests_Cumulative, .direction = "down") %>%
   mutate(Tests_Daily = c(Tests_Cumulative[1], diff(Tests_Cumulative)))
-
-# drop unmergable counties 
-# DSHS_tests_long_NA = subset(DSHS_tests_long_NA, County != 'Unknown' & County != 'Pending Assignments')
-DSHS_tests_long = subset(DSHS_tests_long, County != 'Unknown' & County != 'Pending Assignments')
 ```
 
+##  new cases
+
+```{r}
+DSHS_new_cases_long = rbindlist(lapply(list.files(path = 'original-sources/dshs-new-cases', full.names = TRUE),
+                                read.csv, fileEncoding="utf-16", sep='\t')) %>% 
+  dplyr::select(Date, County, New.Cases) %>% 
+  setNames(c('Date', 'County', 'Cases_Daily_New')) %>% 
+  mutate(Date = ifelse(as.integer(as.Date(Date, '%m/%d/%Y')) < 0, as.Date(Date, '%m/%d/%y'), as.Date(Date, '%m/%d/%Y'))) %>% 
+  mutate(Date = as.Date(Date, origin = '1970-01-01')) %>% 
+  mutate(Cases_Daily_New = gsub(',', '', as.character(Cases_Daily_New), fixed = TRUE)) %>% 
+  mutate(Cases_Daily_New = as.integer(Cases_Daily_New)) %>% 
+  na.omit()
+```
 ## active cases
 
 ```{r}
@@ -320,15 +326,6 @@ colnames(DSHS_active_cases_long) = c('County', 'Date', 'Active_Cases_Cumulative'
 DSHS_active_cases_long$Date = as.Date(gsub('Active|Cases|\r|\n', '',
                                            DSHS_active_cases_long$Date),
                                       format = '%m-%d')
-
-# calculate daily active_cases & drop duplicate dates (07-24 DSHS duplicated)
-# DSHS_active_cases_long_NA =  
-#     DSHS_active_cases_long %>% 
-#     group_by(County) %>% 
-#     unique() %>%
-#     mutate(Active_Cases_Cumulative = as.integer(as.character(Active_Cases_Cumulative))) %>%
-#     tidyr::complete(Date = seq.Date(min(Date), date_out, by="day")) %>%
-#     mutate(Active_Cases_Daily = c(Active_Cases_Cumulative[1], diff(Active_Cases_Cumulative)))
 
 DSHS_active_cases_long =  
     DSHS_active_cases_long %>% 
@@ -357,7 +354,7 @@ Clean_Childcare = function(df, data_type) {
   
   grouped_df = df %>% 
     group_by(County) %>%
-    select(2:5) %>%
+    dplyr::select(2:5) %>%
     mutate_all(as.numeric) %>% 
     summarise_all(sum)
  
@@ -382,13 +379,14 @@ county_childcare_df$County = gsub('Mcculloch', 'McCulloch', county_childcare_df$
 county_childcare_df$County = gsub('Mclennan', 'McLennan', county_childcare_df$County)
 ```
 
+### merge
 
 ```{r}
 # combine DSHS sources using merge helper function
 # https://www.musgraveanalytics.com/blog/2018/2/12/how-to-merge-multiple-data-frames-using-base-r
 
 county_counts = Reduce(function(x, y) merge(x, y, by = c('Date', 'County'), all=TRUE),
-       list(DSHS_cases_long, DSHS_deaths_long, DSHS_tests_long, DSHS_active_cases_long, county_childcare_df))
+       list(DSHS_cases_long, DSHS_new_cases_long, DSHS_deaths_long, DSHS_tests_long, DSHS_active_cases_long, county_childcare_df))
 # 
 # # drop population - will be using census data
 # county_counts$Population.x = NULL
@@ -474,7 +472,7 @@ merged_county = merged_county %>%
 DSHS_tsa_counts =
     merged_county %>%
     group_by(Date, TSA, TSA_Name) %>% 
-    summarize_at(vars(Cases_Cumulative, Cases_Daily,
+    summarize_at(vars(Cases_Cumulative, Cases_Daily, Cases_Daily_New,
                       Deaths_Cumulative, Deaths_Daily,
                       Tests_Cumulative, Tests_Daily,
                       Active_Cases_Cumulative, Active_Cases_Daily),
@@ -534,7 +532,6 @@ DSHS_hosp_clean = function(df, var_name) {
   df_long$Date = as.Date(df_long$Date)
   return(df_long)
 }
-
 # 1,2,3 references the 3 sheets produced by DSHS
 hosp_1 = DSHS_hosp_clean(DSHS_tsa_hosp[[1]], 'Hospitalizations_Total')
 hosp_2 = DSHS_hosp_clean(DSHS_tsa_hosp[[2]], 'Hospitalizations_General')
@@ -564,11 +561,6 @@ hosp_cap3 = DSHS_hosp_clean(DSHS_tsa_hosp_cap[[3]], 'Beds_Occupied_Total')
 hosp_cap4 = DSHS_hosp_clean(DSHS_tsa_hosp_cap[[4]], 'Beds_Occupied_ICU')
 
 hosp_cap4$Beds_Occupied_ICU = gsub('--', NA, hosp_cap4$Beds_Occupied_ICU)
-
-# DSHS duplicated Aug 7th available ICU Beds - fixed 8/17
-# if(length(which(hosp_cap2$Date == '2020-08-07')) > 22) { 
-#   hosp_cap2$Date[which(hosp_cap2$Date == '2020-08-07')[23:44]] = as.Date('2020-08-08')
-# }
 ```
 
 
@@ -641,7 +633,7 @@ merged_tsa = merged_tsa %>%
 DSHS_phr_counts =
     merged_county %>%
     group_by(Date, PHR, PHR_Name) %>%
-    summarize_at(vars(Cases_Cumulative, Cases_Daily,
+    summarize_at(vars(Cases_Cumulative, Cases_Daily, Cases_Daily_New,
                       Deaths_Cumulative, Deaths_Daily,
                       Tests_Cumulative, Tests_Daily,
                       Active_Cases_Cumulative, Active_Cases_Daily),
@@ -815,7 +807,7 @@ hhsc_df = merge(hhsc_alf_df, hhsc_nursing_df, by = c('Date', 'HHSC'))
 DSHS_metro_counts =
     merged_county %>%
     group_by(Date, Metro_Area) %>%
-    summarize_at(vars(Cases_Cumulative, Cases_Daily,
+    summarize_at(vars(Cases_Cumulative, Cases_Daily, Cases_Daily_New,
                       Deaths_Cumulative, Deaths_Daily,
                       Tests_Cumulative, Tests_Daily,
                       Active_Cases_Cumulative, Active_Cases_Daily),
@@ -968,36 +960,36 @@ DSHS_state = read_excel_allsheets('original-sources/DSHS_state.xlsx')
 
 ```{r}
 DSHS_tests = DSHS_state[[4]]
-DSHS_tests = DSHS_tests[1:(nrow(DSHS_tests) - 3), ]
 
-colnames(DSHS_tests) = c('Date', 'Viral_Tests', 'Antibody_Tests', 'Antigen Tests',  'Tests_Total', 'Positive_Rate', 'Viral_Tests_New_Avg', 'Antibody_Tests_New_Avg', 'Total_Tests_New_Avg')
+# LAB TESTS
+# select lab tests & remove rows where all rows are NA
+DSHS_lab_tests = DSHS_tests[2:nrow(DSHS_tests), 1:4] %>%
+  setNames(c('Date', 'LAB_Tests_Daily', 'LAB_Positive_Tests_Daily','LAB_Positivity_Rate')) %>%
+  filter(rowSums(is.na(.)) < ncol(.)) %>%
+  mutate(Date = as.Date(as.integer(Date), origin = '1899-12-30'))
 
-# fix date (https://stackoverflow.com/questions/43230470/how-to-convert-excel-date-format-to-proper-date-in-r) 
-DSHS_tests$Date = as.Date(as.integer(DSHS_tests$Date), origin = '1899-12-30')
-
-# fix calc col type
-DSHS_tests$Positive_Rate = as.numeric(DSHS_tests$Positive_Rate)
+# SPECIMEN TESTS
+DSHS_specimen_tests = DSHS_tests[2:nrow(DSHS_tests), c(6,7,9,11)] %>% 
+  setNames(c('Date', 'SPECIMEN_Tests_Daily','SPECIMEN_Positive_Tests_Daily',
+             'SPECIMEN_Positivity_Rate')) %>% 
+  filter(rowSums(is.na(.)) < ncol(.)) %>%
+  mutate(Date = as.Date(as.integer(Date), origin = '1899-12-30'))
 ```
 
 
 ```{r}
-# drop row num
-DSHS_hospitalizations = DSHS_state[[9]][, c(2:3)]
-
-# drop footnote
-DSHS_hospitalizations = DSHS_hospitalizations[1:(nrow(DSHS_hospitalizations) - 2), ]
-
-# fix date
-DSHS_hospitalizations$Date = as.Date(DSHS_hospitalizations$Date, format = '%Y%m%d')
-
-# set colnames
-colnames(DSHS_hospitalizations)[2] = 'Hospital_Total'
+# selects covid hospitalization time series, drops footnote, formates date and sets colnames
+DSHS_hospitalizations = DSHS_state[[8]][, c(2:3)] %>%
+  filter(rowSums(is.na(.)) < ncol(.)) %>% 
+  setNames(c('Date', 'Hospitalizations_Total')) %>%
+  mutate(Date = as.Date(Date))
 ```
 
 
 ```{r}
 # merge tests & hospitalizations
-DSHS_state_time = merge(DSHS_tests, DSHS_hospitalizations, by = 'Date', all = TRUE)
+DSHS_state_time = Reduce(function(x, y) merge(x, y, by = c('Date')),
+       list(DSHS_specimen_tests, DSHS_lab_tests, DSHS_hospitalizations))
 ```
 
 ## DSHS (day counts)
@@ -1006,64 +998,65 @@ DSHS_state_time = merge(DSHS_tests, DSHS_hospitalizations, by = 'Date', all = TR
 # avoids duplication of results between sheets
 DSHS_state_day = data.frame(Recovered_Total = DSHS_state[[3]][1,1],
                             Active_Total = DSHS_state[[3]][1,2],
-                            Tests_State_Lab = DSHS_state[[5]][1,2],
-                            Tests_Commercial_Lab = DSHS_state[[5]][2,2],
                             Antigen_Tests_Total = DSHS_state[[6]][1,2],
                             Antigen_Tests_Positive = DSHS_state[[6]][2,2],
-                            Antibody_Tests_Total = DSHS_state[[7]][1,2],
-                            Antibody_tests_Positive = DSHS_state[[7]][2,2],
-                            Hospital_Bed_Total = DSHS_state[[8]][2,2],
-                            Hospital_Bed_Available = DSHS_state[[8]][3,2],
-                            ICU_Bed_Available = DSHS_state[[8]][4,2],
-                            Ventilator_Available = DSHS_state[[8]][5,2],
-                            Case_Investigations = DSHS_state[[10]][[14,2]],
-                            Death_Investigations = DSHS_state[[13]][14,2])
+                            Antibody_Tests_Total = DSHS_state[[5]][1,2],
+                            Antibody_tests_Positive = DSHS_state[[5]][2,2],
+                            Hospital_Bed_Total = DSHS_state[[7]][2,2],
+                            Hospital_Bed_Available = DSHS_state[[7]][3,2],
+                            ICU_Bed_Available = DSHS_state[[7]][4,2],
+                            Ventilator_Available = DSHS_state[[7]][5,2],
+                            Case_Investigations = DSHS_state[[9]][[14,2]],
+                            Death_Investigations = DSHS_state[[12]][14,2])
 ```
 
 ## DSHS Demographics
 
 ```{r}
+# TODO: refactor (clean once and append to the cleaned files) - primary script bottleneck
 # read in all files
 demo.list <- paste0('original-sources/historical/demo/',
                     list.files(path = 'original-sources/historical/demo',
                                pattern = '*.xlsx'))
 
-DSHS_case_age <- append(lapply(demo.list[1:66], read_excel, sheet = 9),
-                        lapply(demo.list[67:length(demo.list)], read_excel, sheet = 10))
-                        
-DSHS_case_gender <- append(lapply(demo.list[1:66], read_excel, sheet = 10),
-                           lapply(demo.list[67:length(demo.list)], read_excel, sheet = 11))
+DSHS_case_age <- append(lapply(demo.list[c(1:66, 104:length(demo.list))], read_excel, sheet = 9),
+                        lapply(demo.list[67:103], read_excel, sheet = 10))
 
-DSHS_case_race <- append(lapply(demo.list[1:66], read_excel, sheet = 11),
-                        lapply(demo.list[67:length(demo.list)], read_excel, sheet = 12))
+DSHS_case_gender <- append(lapply(demo.list[c(1:66, 104:length(demo.list))], read_excel, sheet = 10),
+                           lapply(demo.list[67:103], read_excel, sheet = 11))
 
-DSHS_death_age <- append(lapply(demo.list[1:66], read_excel, sheet = 12),
-                         lapply(demo.list[67:length(demo.list)], read_excel, sheet = 13))
+DSHS_case_race <- append(lapply(demo.list[c(1:66, 104:length(demo.list))], read_excel, sheet = 11),
+                        lapply(demo.list[67:103], read_excel, sheet = 12))
 
-DSHS_death_gender <- append(lapply(demo.list[1:66], read_excel, sheet = 13),
-                            lapply(demo.list[67:length(demo.list)], read_excel, sheet = 14))
+DSHS_death_age <- append(lapply(demo.list[c(1:66, 104:length(demo.list))], read_excel, sheet = 12),
+                         lapply(demo.list[67:103], read_excel, sheet = 13))
 
-DSHS_death_race <- append(lapply(demo.list[1:66], read_excel, sheet = 14),
-                          lapply(demo.list[67:length(demo.list)], read_excel, sheet = 15))
+DSHS_death_gender <- append(lapply(demo.list[c(1:66, 104:length(demo.list))], read_excel, sheet = 13),
+                            lapply(demo.list[67:103], read_excel, sheet = 14))
+
+DSHS_death_race <- append(lapply(demo.list[c(1:66, 104:length(demo.list))], read_excel, sheet = 14),
+                          lapply(demo.list[67:103], read_excel, sheet = 15))
 
 DSHS_demo_clean = function(df) {
   # search for updated date (digit "/" digit)
   date = str_extract_all(colnames(df)[1], '\\d+\\/\\d+')[[1]]
+
   df = df[2:(nrow(df) - 4), ]
-  
   colnames(df) = c('Group', 'var_Cumulative', 'var_PCT')
 
   # remove any rows containing total
   total_check = which(df[, 'Group'] == 'Total')
   if (length(total_check) != 0) {df = df[-which(df[, 'Group'] == 'Total'), ]}
 
-  # ensure values are numeric, PCT reported in decimals, and drop coerced NAs (eg. Gender 7/8)
   df = df %>%
     mutate(Date = as.Date(paste0('2020/', date))) %>%
-    mutate(var_PCT = gsub('%','',var_PCT)) %>%
-    mutate_at(c('var_Cumulative', 'var_PCT'), as.numeric) %>% 
-    mutate(var_PCT = ifelse(var_PCT > 1, var_PCT/100, var_PCT)) %>%
+    mutate(var_Cumulative = as.numeric(var_Cumulative)) %>%
+    mutate(var_PCT = as.numeric(gsub('%', '', var_PCT))) %>%
     na.omit()
+
+  # Coerce % to decimal if % found in column values, otherwise just convert char to numeric 
+  # 1.1 to account for minor rounding errors
+  if(sum(df[['var_PCT']]) > 1.1) {df[['var_PCT']] = df[['var_PCT']] / 100}
 
   return(df)
 }
@@ -1100,7 +1093,7 @@ DSHS_race_df = merge(DSHS_case_race_df, DSHS_death_race_df, by = c('Date', 'Grou
 state_counts =
     merged_county %>%
     group_by(Date) %>%
-    summarize_at(vars(Cases_Cumulative, Cases_Daily,
+    summarize_at(vars(Cases_Cumulative, Cases_Daily, Cases_Daily_New,
                       Deaths_Cumulative, Deaths_Daily,
                       Tests_Cumulative, Tests_Daily,
                       Active_Cases_Cumulative, Active_Cases_Daily),
@@ -1151,6 +1144,13 @@ merged_state = merged_state %>%
 
 # OUTPUT 
 
+## Schools
+
+```{r}
+write.csv(nyt_schools, file = 'combined-datasets/schools.csv', row.names = F)
+```
+
+
 ## City
 
 ```{r}
@@ -1195,7 +1195,11 @@ write.csv(county_demo_2018, file = 'combined-datasets/county_demo.csv', row.name
 ```{r}
 write.csv(merged_tsa, file = 'combined-datasets/tsa.csv', row.names = F)
 
-hosp_tsa = merged_tsa[, c(1:3, 18:26)] %>% filter(Date >= min(hosp_cap1$Date))
+hosp_tsa = merged_tsa %>% 
+  dplyr::select(Date, TSA, TSA_Name, TSA_Combined, Population_DSHS, Ventilators_Available,
+                Hospitalizations_Total, Hospitalizations_General, Hospitalizations_ICU,
+                Beds_Available_Total, Beds_Available_ICU, Beds_Occupied_Total, Beds_Occupied_ICU) %>% 
+  filter(Date >= min(hosp_cap1$Date))
 write.csv(hosp_tsa, file = 'tableau/hospitalizations_tsa.csv', row.names = F)
 ```
 
